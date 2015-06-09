@@ -15,8 +15,10 @@ parser.add_argument('--folder', dest = 'folder', help = 'Working folder', defaul
 parser.add_argument('--creduce', dest = 'creduce', help = 'Path to creduce command', default = 'creduce')
 parser.add_argument('--start-timeout', dest = 'start_timeout', help = 'Start timeout', default = 10)
 parser.add_argument('--timeout-step', dest = 'timeout_step', help = 'Timeout step', default = 10)
+parser.add_argument('-v', '--verbose', dest = 'verbose', action = 'store_true', help = 'Verbose')
 
 args = parser.parse_args()
+fnull = open(os.devnull, 'w')
 
 class BaseOperation:
     def __init__(self, command, pre_command, post_command):
@@ -59,6 +61,12 @@ class ReduceOperation(BaseOperation):
         self.input = input
         self.output = None
         self.original_output = None
+        self.validate()
+
+    def validate(self):
+        if not os.path.exists(self.input):
+            print('Missing input file: %s' % self.input)
+            exit(1)
 
     def build_command(self, script_argument = False):
         return self.build_commands(self.replace_tokens(self.command, [self.input] if not script_argument else ['$1'], self.output))
@@ -188,12 +196,19 @@ class MultiReduce:
             shutil.rmtree(t)
         os.makedirs(t)
 
+    def validate(self):
+        try:
+            call([args.creduce, '--help'], stdout = fnull, stderr = fnull)
+        except:
+            print('creduce command not found')
+            exit(1)
+
     def reduce(self):
+        self.validate()
         self.wipe_tmp()
         self.fix_temp_names()
         self.create_script_files()
         timeout = int(args.start_timeout)
-        fnull = open(os.devnull, 'w')
         iteration = 0
         done = set()
         while True:
@@ -211,18 +226,23 @@ class MultiReduce:
                 print('Running global script')
                 check_output(['bash', self.script], stderr = fnull)
                 print('Running %u. round with timeout: %u s: %s' % (iteration, timeout, r.script_file))
-                multi.print_file_stats()
+                if args.verbose:
+                    multi.print_file_stats()
                 try:
-                    check_output(['creduce', r.script_file, r.input], timeout = timeout)
+                    check_output([args.creduce, r.script_file, r.input], timeout = timeout)
                     done.add(r)
                 except subprocess.TimeoutExpired as e:
                     best = os.path.splitext(r.input)[0] + '.best'
                     shutil.copyfile(best, r.input)
-                    print('Copy best file to the current one: %s' % best)
-                    print('Output from creduce:')
-                    print(e.output.decode(encoding = 'utf-8'))
+                    if args.verbose:
+                        print('Copy best file to the current one: %s' % best)
+                        print('Output from creduce:')
+                        print(e.output.decode(encoding = 'utf-8'))
 
             timeout += int(args.timeout_step)
+
+if args.folder != None:
+    os.chdir(args.folder)
 
 ### EXAMPLE ###
 
@@ -237,10 +257,6 @@ c5 = ReduceOperation('g++ ' + options + ' @0 -o @$', 'e.ii', post_command = defa
 
 m1 = MergeOperation('ar cr @$ @0 @1 @2', [c3, c4, c5], 'ar', lambda x: 'rm -f ' + x.output)
 m2 = MergeOperation('g++ -Wl,--start-group @0 @1 @2 -Wl,-Bstatic -lm -Wl,-Bdynamic -llzma -lbz2 -ltcmalloc_minimal -ldl -lboost_program_options -lSegFault -lz -lboost_thread -lboost_system -lrt -Wl,--end-group -g -pthread -O3 -flto=8 -D_GLIBCXX_USE_CXX11_ABI=0 2>&1 -o @$ | grep "internal compiler error"', [m1, c1, c2], 'link', post_command = default_check)
-
-# run commands in a loop
-if args.folder != None:
-    os.chdir(args.folder)
 
 multi = MultiReduce([c1, c2, c3, c4, c5], [m1, m2])
 multi.reduce()
